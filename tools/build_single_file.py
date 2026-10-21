@@ -50,7 +50,7 @@ header = '''// ==WindhawkMod==
 // @id              fluid-taskbar-auto-hide
 // @name            Fluid taskbar auto-hide
 // @description     Smooth taskbar animations with independent visibility controls for four displays
-// @version         2.0.0
+// @version         2.1.0
 // @author          m417z (original mods), Fluid taskbar contributors
 // @include         explorer.exe
 // @architecture    x86-64

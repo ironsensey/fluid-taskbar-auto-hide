@@ -56,10 +56,14 @@ when auto-hide is permitted; this mod does not force-hide a taskbar while you us
 
 - Default reveal/hide speed: 140% / 130%; adjustable with bounded inputs.
 - Automatic refresh-rate detection (FPS = 0), or 30–360 FPS for the classic taskbar.
-- Linear, quadratic, cubic, quartic, or smoothstep easing for the classic taskbar.
-  Default cubic uses a nominal 250 ms duration; use linear if the timing differs on
+- Linear, quadratic, cubic, quartic, smoothstep, or smootherstep easing for the classic taskbar.
+  Default smootherstep uses a nominal 250 ms duration and eases both velocity
+  and acceleration at the endpoints; use linear if the timing differs on
   your Windows build. Native Windows 11 composition retains its native curve.
-- Optional short-lived 1 ms timer resolution; no busy-wait or spin loop.
+- Frame deadlines stay on the selected FPS cadence instead of accumulating render
+  and scheduler delays. Late frames yield; long stalls resume without catch-up bursts.
+- Optional short-lived 1 ms timer resolution, requested only when the classic
+  taskbar actually sleeps between frames; no busy-wait or spin loop.
 - Optional removal of native Windows 11 animation delay, with original durations
   and delays restored on unload, including animation objects rebuilt by Explorer.
 - Timing is isolated per thread and restored after nested animations. Long Sleep
@@ -79,6 +83,37 @@ The classic clock hooks still affect same-thread reentrant calls during SlideWin
 if volume problems persist, set show/hide speed to 100%, choose linear easing, and turn off high-precision
 frame pacing and delay removal to help isolate the animation changes.
 
+## Lower overhead in v2.1
+
+All 18 settings and the existing visibility rules remain available. The event
+coalescing interval stays at 200 ms, and animation speed and FPS settings are not
+reduced to save power.
+
+- Monitor-slot mappings are cached until a display/settings change or taskbar
+  recreation. Repeated window events no longer enumerate and sort every display.
+- Small/ineligible windows skip the expensive cloak, process-path and app-ID
+  exclusion queries. Exclusions are still checked before any qualifying window
+  is allowed to trigger auto-hide.
+- Taskbar bounds are fetched only when intersection/snapped-window rules need them.
+- Window-event monitoring stays off when adaptive pinning is disabled, all four
+  pins are off, or selected displays are set to never auto-hide.
+- Repeated movement events share the already pending update. Task View and Alt+Tab
+  state transitions continue to be processed. Verbose per-event process/title
+  diagnostics were removed.
+- Instant animations skip refresh-rate/clock queries. High-resolution timer
+  requests are deferred until a paced sleep, then released when that animation ends.
+
+For the new motion curve, select **Smootherstep (gentle start and stop)** in
+**Classic taskbar easing**. It is the default for fresh installs; Windhawk may
+retain your previous selection when replacing an existing mod. Windows 11's native
+composition animation keeps its system curve; these custom easing/FPS controls
+apply to the classic taskbar path.
+
+Counted stub tests reduce 400 repeated slot lookups to one display enumeration,
+and confirm the visibility decisions still match v2.0. These are operation counts,
+not a measured battery-life improvement. Actual energy use and perceived smoothness
+still need Windows hardware testing.
+
 ## Validation
 
 Portable checks (Linux or another machine with Python 3 and GCC with sanitizers):
@@ -89,11 +124,17 @@ cd /workspace/fluid-taskbar-auto-hide
 ```
 
 The runner checks that embedded helper functions match the tested source, then runs
-600,030 timing samples (monotonicity, endpoints, bounds, and completion), fullscreen
+720,036 timing samples (monotonicity, endpoints, bounds, and completion), fullscreen
 geometry checks, and all four-display toggle combinations under AddressSanitizer
 and UndefinedBehaviorSanitizer. Temporary binaries are removed automatically.
 The combined lifecycle is also compiled against a stub host to check initialization,
 shared module dispatch, reload, unload order, and cleanup after initialization failure.
+The power-path tests also compile the actual optimized functions against counted
+Win32 stubs: display-cache invalidation, timer acquisition/release, nesting and
+exceptions, and 98,304 visibility cases compared with the v2.0 predicate. They check
+that irrelevant windows avoid process/app-ID queries and that disabled adaptive
+pinning does not start window-event monitoring. Cadence simulations cover
+30, 60, 90, 144, 240, and 360 FPS with variable rendering cost and scheduler delay.
 These tests do **not** compile the Windows hooks or exercise Explorer.
 
 ### Required Windows validation — not executed in the Linux cloud environment
@@ -111,6 +152,9 @@ These tests do **not** compile the Windows hooks or exercise Explorer.
 - Test the snapped-window setting, exclusions, speed/FPS bounds, and live settings
   changes. Disable/unload the mod and verify original Windows behavior returns.
 - Repeat after restarting Explorer and with ExplorerPatcher if used.
+- Compare CPU use and power on the same battery/refresh-rate settings while idle,
+  dragging windows, and repeatedly revealing/hiding. Check frame pacing at 60 Hz
+  and high refresh rates. No battery-life percentage has been measured here.
 
 No Windows runtime testing or successful Windows compilation is claimed. Unsupported
 Windows updates may change private Explorer symbols and require hook updates.

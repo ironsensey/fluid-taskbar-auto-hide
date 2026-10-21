@@ -1,4 +1,5 @@
 #include <cassert>
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include "../animation-math.inc"
@@ -6,7 +7,7 @@
 
 int main() {
     unsigned samples = 0;
-    for (int mode = 0; mode <= 4; ++mode) {
+    for (int mode = 0; mode <= 5; ++mode) {
         for (bool show : {false, true}) {
             for (double duration : {50.0, 250.0, 2000.0}) {
                 double previous = 0;
@@ -27,6 +28,30 @@ int main() {
                 assert(AnimationTime(duration, duration, mode, show) == duration);
             }
         }
+    }
+    // Smootherstep has gentler endpoint velocity and acceleration than cubic.
+    assert(AnimationTime(1, 250, 5, true) < AnimationTime(1, 250, 4, true));
+    assert(250 - AnimationTime(249, 250, 5, true) <
+           250 - AnimationTime(249, 250, 4, true));
+    // Simulate frame scheduling with oversleep and variable render cost.
+    for (double fps : {30.0, 60.0, 90.0, 144.0, 240.0, 360.0}) {
+        double period = 1.0 / fps;
+        double now = 0;
+        double deadline = period;
+        for (int frame = 0; frame < 1000; ++frame) {
+            now += (frame % 3) * 0.0001; // work before Sleep
+            unsigned sleep = FrameSleepMilliseconds(now, deadline);
+            assert(sleep <= 34);
+            now += sleep / 1000.0 + 0.0002; // scheduler oversleep
+            assert(now >= deadline - 1e-9);
+            assert(now - deadline < 0.0013);
+            deadline = AdvanceFrameDeadline(deadline, now, period);
+        }
+        // Absolute deadlines stay on the cadence instead of adding overhead.
+        assert(std::abs(deadline - period * 1001) < 1e-8);
+        assert(FrameSleepMilliseconds(deadline + 0.1, deadline) == 0);
+        double resumed = AdvanceFrameDeadline(deadline, deadline + 0.1, period);
+        assert(std::abs(resumed - (deadline + 0.1 + period)) < 1e-9);
     }
     assert(AnimationTime(125, 250, 2, true) > 125);
     assert(AnimationTime(125, 250, 2, false) < 125);

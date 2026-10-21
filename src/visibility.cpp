@@ -97,6 +97,7 @@ taskbar.
 #include <algorithm>
 #include <cwchar>
 #include <vector>
+#include <iterator>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -410,63 +411,6 @@ std::wstring GetWindowAppId(HWND hWnd) {
     return result;
 }
 
-std::wstring GetProcessFileName(DWORD dwProcessId) {
-    HANDLE hProcess =
-        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, dwProcessId);
-    if (!hProcess) {
-        return std::wstring{};
-    }
-
-    WCHAR processPath[MAX_PATH];
-
-    DWORD dwSize = ARRAYSIZE(processPath);
-    if (!QueryFullProcessImageName(hProcess, 0, processPath, &dwSize)) {
-        CloseHandle(hProcess);
-        return std::wstring{};
-    }
-
-    CloseHandle(hProcess);
-
-    PCWSTR processFileName = wcsrchr(processPath, L'\\');
-    if (!processFileName) {
-        return std::wstring{};
-    }
-
-    processFileName++;
-    return processFileName;
-}
-
-std::wstring GetWindowLogInfo(HWND hWnd) {
-    DWORD dwProcessId = 0;
-    GetWindowThreadProcessId(hWnd, &dwProcessId);
-    std::wstring processName = GetProcessFileName(dwProcessId);
-
-    WCHAR className[256];
-    if (!GetClassName(hWnd, className, ARRAYSIZE(className))) {
-        wcscpy_s(className, L"<unknown>");
-    }
-
-    WCHAR windowName[256];
-    if (!GetWindowText(hWnd, windowName, ARRAYSIZE(windowName))) {
-        windowName[0] = L'\0';
-    }
-
-    LONG style = GetWindowLong(hWnd, GWL_STYLE);
-    LONG exStyle = GetWindowLong(hWnd, GWL_EXSTYLE);
-
-    RECT rect{};
-    GetWindowRect(hWnd, &rect);
-
-    WCHAR buffer[1024];
-    swprintf_s(buffer,
-               L"window %08X: PID=%u, process=%s, class=%s, name=%s, "
-               L"style=0x%08X, exStyle=0x%08X, rect={%d,%d,%d,%d}",
-               (DWORD)(DWORD_PTR)hWnd, dwProcessId, processName.c_str(),
-               className, windowName, style, exStyle, rect.left, rect.top,
-               rect.right, rect.bottom);
-    return buffer;
-}
-
 bool IsWindowExcluded(HWND hWnd) {
     if (g_settings.excludedPrograms.empty()) {
         return false;
@@ -531,7 +475,7 @@ bool CanHideTaskbarForWindow(HWND hWnd,
                              HMONITOR monitor,
                              const MONITORINFO* monitorInfo,
                              const RECT* taskbarRect) {
-    if (!IsWindowVisible(hWnd) || IsWindowCloaked(hWnd) || IsIconic(hWnd) ||
+    if (!IsWindowVisible(hWnd) || IsIconic(hWnd) ||
         (GetWindowLong(hWnd, GWL_EXSTYLE) & WS_EX_NOACTIVATE)) {
         return false;
     }
@@ -560,18 +504,13 @@ bool CanHideTaskbarForWindow(HWND hWnd,
         return false;
     }
 
-    // Check this after the other checks, as it's the most expensive one.
-    if (IsWindowExcluded(hWnd)) {
-        return false;
-    }
-
     WINDOWPLACEMENT wp{
         .length = sizeof(WINDOWPLACEMENT),
     };
 
     if (GetWindowPlacement(hWnd, &wp) && wp.showCmd == SW_SHOWMAXIMIZED) {
         if (MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST) == monitor) {
-            return true;
+            return !IsWindowCloaked(hWnd) && !IsWindowExcluded(hWnd);
         }
 
         return false;
@@ -595,7 +534,7 @@ bool CanHideTaskbarForWindow(HWND hWnd,
                       windowRect.bottom, monitorInfo->rcMonitor.left,
                       monitorInfo->rcMonitor.top, monitorInfo->rcMonitor.right,
                       monitorInfo->rcMonitor.bottom)) {
-        return true;
+        return !IsWindowCloaked(hWnd) && !IsWindowExcluded(hWnd);
     }
 
     // It makes sense to treat arranged windows (e.g. with Win+left) as
@@ -606,36 +545,65 @@ bool CanHideTaskbarForWindow(HWND hWnd,
         (g_settings.mode == Mode::maximized && g_settings.snappedWindows && isWindowArranged)) {
         RECT intersectRect;
         if (IntersectRect(&intersectRect, &windowRect, taskbarRect)) {
-            return true;
+            return !IsWindowCloaked(hWnd) && !IsWindowExcluded(hWnd);
         }
     }
 
     return false;
 }
 
-bool ShouldKeepTaskbarShown(HWND hTaskbarWnd, HMONITOR monitor) {
-    if (!g_settings.adaptiveEnabled) return false;
-    struct MonitorSlot { HMONITOR handle; bool primary; std::wstring device; };
-    std::vector<MonitorSlot> monitors;
-    if (!EnumDisplayMonitors(nullptr, nullptr,
-        [](HMONITOR handle, HDC, LPRECT, LPARAM data) -> BOOL {
-            MONITORINFOEXW info{};
-            info.cbSize = sizeof(info);
-            if (!GetMonitorInfoW(handle, &info)) return FALSE;
-            auto& list = *reinterpret_cast<std::vector<MonitorSlot>*>(data);
-            list.push_back({handle, (info.dwFlags & MONITORINFOF_PRIMARY) != 0,
-                            info.szDevice});
-            return TRUE;
-        }, reinterpret_cast<LPARAM>(&monitors))) return false;
-    std::sort(monitors.begin(), monitors.end(), [](const auto& a, const auto& b) {
-        if (a.primary != b.primary) return a.primary > b.primary;
-        return a.device < b.device;
-    });
-    int slot = -1;
-    for (size_t i = 0; i < monitors.size(); ++i) {
-        if (monitors[i].handle == monitor) slot = static_cast<int>(i);
+struct MonitorSlot { HMONITOR handle; bool primary; std::wstring device; };
+std::mutex g_monitorSlotsMutex;
+std::vector<MonitorSlot> g_monitorSlots;
+bool g_monitorSlotsValid = false;
+
+void InvalidateMonitorSlots() {
+    std::lock_guard<std::mutex> guard(g_monitorSlotsMutex);
+    g_monitorSlotsValid = false;
+}
+
+int GetMonitorSlot(HMONITOR monitor) {
+    std::lock_guard<std::mutex> guard(g_monitorSlotsMutex);
+    if (!g_monitorSlotsValid) {
+        // Build a complete replacement before publishing it. Failed enumeration
+        // is retried on the next update instead of retaining a partial topology.
+        std::vector<MonitorSlot> monitors;
+        if (!EnumDisplayMonitors(nullptr, nullptr,
+            [](HMONITOR handle, HDC, LPRECT, LPARAM data) -> BOOL {
+                MONITORINFOEXW info{};
+                info.cbSize = sizeof(info);
+                if (!GetMonitorInfoW(handle, &info)) return FALSE;
+                auto& list = *reinterpret_cast<std::vector<MonitorSlot>*>(data);
+                list.push_back({handle, (info.dwFlags & MONITORINFOF_PRIMARY) != 0,
+                                info.szDevice});
+                return TRUE;
+            }, reinterpret_cast<LPARAM>(&monitors))) return -1;
+        std::sort(monitors.begin(), monitors.end(), [](const auto& a, const auto& b) {
+            if (a.primary != b.primary) return a.primary > b.primary;
+            return a.device < b.device;
+        });
+        g_monitorSlots = std::move(monitors);
+        g_monitorSlotsValid = true;
     }
-    if (!UseAdaptivePin(g_settings.adaptiveEnabled, slot, g_settings.pinDisplays))
+    for (size_t i = 0; i < g_monitorSlots.size(); ++i) {
+        if (g_monitorSlots[i].handle == monitor) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+bool AdaptivePinningEnabled() {
+    return g_settings.adaptiveEnabled &&
+           std::any_of(std::begin(g_settings.pinDisplays),
+                       std::end(g_settings.pinDisplays), [](bool pin) { return pin; });
+}
+
+bool NeedsWindowEvents() {
+    return AdaptivePinningEnabled() && g_settings.mode != Mode::never;
+}
+
+bool ShouldKeepTaskbarShown(HWND hTaskbarWnd, HMONITOR monitor) {
+    if (!AdaptivePinningEnabled()) return false;
+    if (!UseAdaptivePin(true, GetMonitorSlot(monitor), g_settings.pinDisplays))
         return false;
 
     if (g_settings.primaryMonitorOnly &&
@@ -658,7 +626,9 @@ bool ShouldKeepTaskbarShown(HWND hTaskbarWnd, HMONITOR monitor) {
     if (!GetMonitorInfo(monitor, &monitorInfo)) return false;
 
     RECT taskbarRect{};
-    GetTaskbarRectForMonitor(monitor, &taskbarRect);
+    if (g_settings.mode == Mode::intersected || g_settings.snappedWindows) {
+        GetTaskbarRectForMonitor(monitor, &taskbarRect);
+    }
 
     if (g_settings.foregroundWindowOnly) {
         HWND hForegroundWnd = GetForegroundWindow();
@@ -682,8 +652,8 @@ bool ShouldKeepTaskbarShown(HWND hTaskbarWnd, HMONITOR monitor) {
             return TRUE;
         }
 
-        Wh_Log(L"Can hide taskbar %08X for %s", (DWORD)(DWORD_PTR)hTaskbarWnd,
-               GetWindowLogInfo(hWnd).c_str());
+        Wh_Log(L"Can hide taskbar %08X for window %08X",
+               (DWORD)(DWORD_PTR)hTaskbarWnd, (DWORD)(DWORD_PTR)hWnd);
         return FALSE;
     };
 
@@ -716,7 +686,7 @@ void* QueryViaVtableBackwards(void* object, void* vtable) {
 DWORD WINAPI WinEventHookThread(LPVOID lpThreadParameter);
 
 void AdjustTaskbar(HWND hMMTaskbarWnd, bool clearPendingWhenDone = false) {
-    if (g_settings.mode != Mode::never) {
+    if (NeedsWindowEvents()) {
         if (!g_winEventHookThread) {
             std::lock_guard<std::mutex> guard(g_winEventHookThreadMutex);
 
@@ -901,10 +871,16 @@ LRESULT WINAPI TrayUI_WndProc_Hook(void* pThis,
                                    WPARAM wParam,
                                    LPARAM lParam,
                                    bool* flag) {
+    if (Msg == WM_DISPLAYCHANGE || Msg == WM_SETTINGCHANGE) {
+        InvalidateMonitorSlots();
+        AdjustAllTaskbars();
+    }
     if (Msg == WM_NCCREATE) {
+        InvalidateMonitorSlots();
         Wh_Log(L"WM_NCCREATE: %08X", (DWORD)(ULONG_PTR)hWnd);
         AdjustTaskbar(hWnd);
     } else if (Msg == WM_NCDESTROY) {
+        InvalidateMonitorSlots();
         Wh_Log(L"WM_NCDESTROY: %08X", (DWORD)(ULONG_PTR)hWnd);
         g_taskbarsKeptShown.erase(
             QueryViaVtableBackwards(pThis, TrayUI_vftable_IInspectable));
@@ -988,10 +964,16 @@ LRESULT WINAPI CSecondaryTray_v_WndProc_Hook(void* pThis,
                                              UINT Msg,
                                              WPARAM wParam,
                                              LPARAM lParam) {
+    if (Msg == WM_DISPLAYCHANGE || Msg == WM_SETTINGCHANGE) {
+        InvalidateMonitorSlots();
+        AdjustTaskbar(hWnd);
+    }
     if (Msg == WM_NCCREATE) {
+        InvalidateMonitorSlots();
         Wh_Log(L"WM_NCCREATE: %08X", (DWORD)(ULONG_PTR)hWnd);
         AdjustTaskbar(hWnd);
     } else if (Msg == WM_NCDESTROY) {
+        InvalidateMonitorSlots();
         Wh_Log(L"WM_NCDESTROY: %08X", (DWORD)(ULONG_PTR)hWnd);
         g_taskbarsKeptShown.erase(pThis);
         g_taskbarToViewCoordinator.erase(hWnd);
@@ -1042,6 +1024,10 @@ void CALLBACK WinEventProc(HWINEVENTHOOK hWinEventHook,
                            LONG idChild,
                            DWORD dwEventThread,
                            DWORD dwmsEventTime) {
+    // A pending update scans the latest window state. Movement events cannot
+    // change tracked Win+Tab/Alt+Tab entry/exit state, so coalesce them early.
+    if (event == EVENT_OBJECT_LOCATIONCHANGE && g_pendingEventsTimer) return;
+
     if (idObject != OBJID_WINDOW ||
         (GetWindowLong(hWnd, GWL_STYLE) & WS_CHILD) || IsTaskbarWindow(hWnd)) {
         return;
@@ -1096,32 +1082,6 @@ void CALLBACK WinEventProc(HWINEVENTHOOK hWinEventHook,
             // Fall through to trigger timer for all taskbars.
         }
     }
-
-    Wh_Log(
-        L"Event %s for %s",
-        [](DWORD event) -> PCWSTR {
-            switch (event) {
-                case EVENT_OBJECT_CREATE:
-                    return L"OBJECT_CREATE";
-                case EVENT_OBJECT_DESTROY:
-                    return L"OBJECT_DESTROY";
-                case EVENT_OBJECT_SHOW:
-                    return L"OBJECT_SHOW";
-                case EVENT_OBJECT_HIDE:
-                    return L"OBJECT_HIDE";
-                case EVENT_OBJECT_LOCATIONCHANGE:
-                    return L"OBJECT_LOCATIONCHANGE";
-                case EVENT_OBJECT_CLOAKED:
-                    return L"OBJECT_CLOAKED";
-                case EVENT_OBJECT_UNCLOAKED:
-                    return L"OBJECT_UNCLOAKED";
-                case EVENT_SYSTEM_FOREGROUND:
-                    return L"SYSTEM_FOREGROUND";
-                default:
-                    return L"UNKNOWN";
-            }
-        }(event),
-        GetWindowLogInfo(hWnd).c_str());
 
     if (g_pendingEventsTimer) {
         return;
@@ -1209,6 +1169,11 @@ DWORD WINAPI WinEventHookThread(LPVOID lpThreadParameter) {
 
     if (winSystemEventHook1) {
         UnhookWinEvent(winSystemEventHook1);
+    }
+
+    if (g_pendingEventsTimer) {
+        KillTimer(nullptr, g_pendingEventsTimer);
+        g_pendingEventsTimer = 0;
     }
 
     g_multitaskingViewHwnd = nullptr;

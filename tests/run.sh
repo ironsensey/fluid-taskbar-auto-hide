@@ -28,3 +28,5 @@ g++ -std=c++20 -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined test
 "$binary"
 
 python3 tests/check_lifecycle.py
+
+python3 tests/check_power_paths.py

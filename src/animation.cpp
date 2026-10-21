@@ -46,7 +46,7 @@ less sluggish and janky.
   $description: >-
     Frames per second. Higher frame rate will use more CPU. Has no effect on the
     new Windows 11 auto-hide animation. Zero matches monitor refresh rate.
-- easingMode: 2
+- easingMode: 5
   $name: Classic taskbar easing
   $description: Applies only to the classic taskbar. Native Windows 11 keeps its composition curve.
   $options:
@@ -55,12 +55,13 @@ less sluggish and janky.
   - 2: Cubic
   - 3: Quartic
   - 4: Smoothstep
+  - 5: Smootherstep (gentle start and stop)
 - nominalDuration: 250
   $name: Classic animation duration before speedup (ms)
   $description: Used to normalize easing. Choose linear if your Windows build uses a different duration.
 - highPrecisionTimer: true
   $name: Improve classic frame pacing
-  $description: Requests 1 ms timer resolution only during an animation. Never busy-waits.
+  $description: Requests 1 ms timer resolution only when a classic animation sleeps between frames. Never busy-waits.
 - removeDelay: true
   $name: Remove native Windows 11 animation delay
 - oldTaskbarOnWin11: false
@@ -120,7 +121,9 @@ struct SlideTiming {
     int speed = 100;
     int fps = 60;
     double start = 0;
-    double lastFrame = 0;
+    double nextFrame = 0;
+    bool timerResolutionRequested = false;
+    bool timerResolutionAcquired = false;
 };
 thread_local SlideTiming g_slide;
 
@@ -136,9 +139,24 @@ static double AnimationTime(double elapsed, double duration, int mode, bool show
         case 2: shaped = p * p * p; break;
         case 3: shaped = p * p * p * p; break;
         case 4: return duration * t * t * (3.0 - 2.0 * t);
+        case 5: return duration * std::clamp(
+            t * t * t * (t * (6.0 * t - 15.0) + 10.0), 0.0, 1.0);
         default: return elapsed;
     }
     return duration * (show ? 1.0 - shaped : shaped);
+}
+
+// Use absolute frame deadlines so render/scheduler delays do not accumulate.
+// A late frame yields instead of adding another millisecond of forced latency.
+static unsigned FrameSleepMilliseconds(double now, double deadline) {
+    return static_cast<unsigned>(std::clamp(std::ceil((deadline - now) * 1000.0),
+                                             0.0, 34.0));
+}
+
+static double AdvanceFrameDeadline(double deadline, double now, double period) {
+    double next = deadline + period;
+    // Do not issue a burst of catch-up frames after a stalled Explorer thread.
+    return next > now ? next : now + period;
 }
 
 struct AnimationRecord {
@@ -264,17 +282,20 @@ void WINAPI TrayUI_SlideWindow_Hook(void* pThis,
                                     HMONITOR monitor,
                                     bool show,
                                     bool animate) {
-    struct ScopedTimerResolution {
-        bool acquired;
-        explicit ScopedTimerResolution(bool enable)
-            : acquired(enable && timeBeginPeriod(1) == TIMERR_NOERROR) {}
-        ~ScopedTimerResolution() { if (acquired) timeEndPeriod(1); }
-    } timerResolution{animate && g_settings.highPrecisionTimer};
     const SlideTiming saved = g_slide;
     struct Restore {
         SlideTiming value;
-        ~Restore() { g_slide = value; }
+        ~Restore() {
+            if (g_slide.timerResolutionAcquired) timeEndPeriod(1);
+            g_slide = value;
+        }
     } restore{saved};
+    g_slide = {};
+    if (!animate) {
+        // Instant show/hide needs neither monitor refresh lookup nor a clock.
+        TrayUI_SlideWindow_Original(pThis, hWnd, rect, monitor, show, animate);
+        return;
+    }
     int fps = g_settings.frameRate;
     if (!fps) {
         MONITORINFOEXW info{};
@@ -286,10 +307,11 @@ void WINAPI TrayUI_SlideWindow_Hook(void* pThis,
             EnumDisplaySettingsW(info.szDevice, ENUM_CURRENT_SETTINGS, &mode) &&
             mode.dmDisplayFrequency > 1) fps = mode.dmDisplayFrequency;
     }
+    fps = std::clamp(fps, 30, 360);
     const double now = TimerGetSeconds();
     g_slide = {animate, show,
                show ? g_settings.showSpeedup : g_settings.hideSpeedup,
-               std::clamp(fps, 30, 360), now, now};
+               fps, now, now + 1.0 / fps};
     TrayUI_SlideWindow_Original(pThis, hWnd, rect, monitor, show, animate);
 }
 
@@ -311,10 +333,18 @@ void WINAPI Sleep_Hook(DWORD milliseconds) {
         Sleep_Original(milliseconds);
         return;
     }
-    double remaining = 1000.0 / g_slide.fps -
-                       (TimerGetSeconds() - g_slide.lastFrame) * 1000.0;
-    Sleep_Original(static_cast<DWORD>(std::clamp(std::ceil(remaining), 1.0, 34.0)));
-    g_slide.lastFrame = TimerGetSeconds();
+    // Some SlideWindow paths hand off to composition without sleeping. Request
+    // high timer precision only when classic frame pacing actually needs it.
+    // Failure is remembered for this slide; do not retry on every frame.
+    DWORD sleep = FrameSleepMilliseconds(TimerGetSeconds(), g_slide.nextFrame);
+    if (sleep && g_settings.highPrecisionTimer && !g_slide.timerResolutionRequested) {
+        g_slide.timerResolutionRequested = true;
+        g_slide.timerResolutionAcquired = timeBeginPeriod(1) == TIMERR_NOERROR;
+        sleep = FrameSleepMilliseconds(TimerGetSeconds(), g_slide.nextFrame);
+    }
+    Sleep_Original(sleep);
+    g_slide.nextFrame = AdvanceFrameDeadline(g_slide.nextFrame, TimerGetSeconds(),
+                                            1.0 / g_slide.fps);
 }
 
 bool HookTaskbarViewDllSymbols(HMODULE module) {
@@ -575,7 +605,7 @@ void LoadSettings() {
     g_settings.showSpeedup = std::clamp(Wh_GetIntSetting(L"showSpeedup"), 1, 1000);
     g_settings.hideSpeedup = std::clamp(Wh_GetIntSetting(L"hideSpeedup"), 1, 1000);
     g_settings.frameRate = std::clamp(Wh_GetIntSetting(L"frameRate"), 0, 360);
-    g_settings.easingMode = std::clamp(Wh_GetIntSetting(L"easingMode"), 0, 4);
+    g_settings.easingMode = std::clamp(Wh_GetIntSetting(L"easingMode"), 0, 5);
     g_settings.nominalDuration = std::clamp(Wh_GetIntSetting(L"nominalDuration"), 50, 2000);
     g_settings.highPrecisionTimer = Wh_GetIntSetting(L"highPrecisionTimer") != 0;
     g_settings.removeDelay = Wh_GetIntSetting(L"removeDelay") != 0;
