@@ -83,6 +83,28 @@ The classic clock hooks still affect same-thread reentrant calls during SlideWin
 if volume problems persist, set show/hide speed to 100%, choose linear easing, and turn off high-precision
 frame pacing and delay removal to help isolate the animation changes.
 
+## Long-session and idle stutter changes in v2.2
+
+The previous version retained each distinct native composition animation it saw,
+which could grow the object list and the cost of searching it over a long session.
+The updated mod keeps at most 32 records. Before evicting a live animation it
+restores its original duration/delay; unloading also restores all remaining records.
+Repeated animations no longer receive property writes when their duration/delay
+already matches the requested value.
+
+Automatic refresh-rate results are cached per monitor and UI thread, with a fixed
+limit of eight entries. The cache is invalidated by display/settings changes and
+taskbar recreation, alongside the visibility display cache. The first reveal after
+several idle minutes no longer repeats a successful display-mode lookup. Failed
+lookups are retried, and explicitly selected FPS continues to bypass detection.
+There is no periodic wake-up timer to keep the taskbar warm.
+
+After replacing the source in Windhawk, compile it and disable/re-enable the mod
+once so the old instance releases its animation records. All 18 settings and their
+current defaults are preserved. These fixes address confirmed code-level growing
+state and repeated queries; the reported intermittent Windows stutter has not been
+reproduced in this Linux environment, so universally smooth rendering is not claimed.
+
 ## Lower overhead in v2.1
 
 All 18 settings and the existing visibility rules remain available. The event
@@ -135,6 +157,12 @@ exceptions, and 98,304 visibility cases compared with the v2.0 predicate. They c
 that irrelevant windows avoid process/app-ID queries and that disabled adaptive
 pinning does not start window-event monitoring. Cadence simulations cover
 30, 60, 90, 144, 240, and 360 FPS with variable rendering cost and scheduler delay.
+The long-session tests exercise 20,000 reused animations and 5,000 new animation
+objects with reference-counted WinRT stubs. They check bounded retention, original
+timing restoration on eviction/re-entry/unload, cleanup after a disconnected object,
+and absence of redundant property writes. Simulated four-minute/hour idle gaps,
+display-change invalidation, lookup failure/retry, cache limits, and explicit FPS
+are covered by the refresh-rate tests.
 These tests do **not** compile the Windows hooks or exercise Explorer.
 
 ### Required Windows validation — not executed in the Linux cloud environment
@@ -152,6 +180,9 @@ These tests do **not** compile the Windows hooks or exercise Explorer.
 - Test the snapped-window setting, exclusions, speed/FPS bounds, and live settings
   changes. Disable/unload the mod and verify original Windows behavior returns.
 - Repeat after restarting Explorer and with ExplorerPatcher if used.
+- Leave the taskbar unused for four minutes and for an hour, then reveal/hide it
+  repeatedly. Also exercise several thousand reveals in a session and check that
+  Explorer's memory use does not keep increasing due to retained animation objects.
 - Compare CPU use and power on the same battery/refresh-rate settings while idle,
   dragging windows, and repeatedly revealing/hiding. Check frame pacing at 60 Hz
   and high refresh rates. No battery-life percentage has been measured here.
@@ -173,8 +204,15 @@ modifications; it is not an upstream release. See `LICENSE` for GPL version 3.
 
 `src/animation.cpp` and `src/visibility.cpp` contain the component implementations.
 `python3 tools/build_single_file.py` regenerates the one installable `.wh.cpp` file.
-All includes are emitted outside the component namespaces. There is one shared
+`src/runtime-state.inc` holds the shared display-change generation, emitted inline
+before both components. All includes are emitted outside the component namespaces. There is one shared
 `LoadLibraryExW` hook, one copy of each lifecycle entry point, one settings block,
 and one shared old-taskbar setting. The combined lifecycle initializes both
 components, restores visibility if animation initialization fails, and unloads
 both components. `./tests/run.sh` checks the generated file is current.
+
+In the October 22 cloud validation, this sandbox's process tracing prevented
+LeakSanitizer from starting. The suite ran with `ASAN_OPTIONS=detect_leaks=0`, keeping
+AddressSanitizer and UndefinedBehaviorSanitizer active. The reference-counted
+bookkeeping tests explicitly verify release of all cached animation references;
+this does not substitute for a native Windows leak profiler.

@@ -79,6 +79,7 @@ less sluggish and janky.
 #include <psapi.h>
 
 #include <atomic>
+#include <array>
 #include <algorithm>
 #include <cmath>
 #include <chrono>
@@ -166,6 +167,18 @@ struct AnimationRecord {
 };
 std::mutex g_animationMutex;
 std::vector<AnimationRecord> g_animations;
+// Explorer can return new animation objects over time. Do not retain an
+// unbounded history of compositor resources or search an ever-growing vector.
+constexpr std::size_t kMaxTrackedAnimations = 32;
+
+void RestoreAnimation(const AnimationRecord& record) noexcept {
+    try {
+        record.animation.Duration(record.duration);
+        record.animation.DelayTime(record.delay);
+    } catch (...) {
+        Wh_Log(L"Animation object unavailable during restoration");
+    }
+}
 
 void SetAnimationDuration(
     winrt::Windows::UI::Composition::KeyFrameAnimation animation,
@@ -181,7 +194,7 @@ void SetAnimationDuration(
     } else if (duration > kMax) {
         duration = kMax;
     }
-    animation.Duration(duration);
+    if (animation.Duration() != duration) animation.Duration(duration);
 }
 
 void CustomizeCompositionAnimation(
@@ -193,13 +206,20 @@ void CustomizeCompositionAnimation(
             return winrt::get_abi(record.animation) == winrt::get_abi(animation);
         });
     if (it == g_animations.end()) {
+        if (g_animations.size() == kMaxTrackedAnimations) {
+            // Restore before releasing our reference: an evicted live object
+            // must not keep altered timing or be sped up again on re-entry.
+            RestoreAnimation(g_animations.front());
+            g_animations.erase(g_animations.begin());
+        }
         g_animations.push_back({animation, animation.Duration(), animation.DelayTime()});
         it = std::prev(g_animations.end());
     }
     SetAnimationDuration(animation, it->duration * 100 /
                          (show ? g_settings.showSpeedup : g_settings.hideSpeedup));
-    animation.DelayTime(g_settings.removeDelay ?
-        winrt::Windows::Foundation::TimeSpan{0} : it->delay);
+    const auto delay = g_settings.removeDelay ?
+        winrt::Windows::Foundation::TimeSpan{0} : it->delay;
+    if (animation.DelayTime() != delay) animation.DelayTime(delay);
 }
 
 using SharedAnimations_TaskbarCollapseAnimation_t =
@@ -269,6 +289,43 @@ double TimerGetSeconds() {
     return TimerGetCycles() * g_recipCyclesPerSecond;
 }
 
+struct RefreshRateEntry {
+    HMONITOR monitor{};
+    int fps = 60;
+};
+struct RefreshRateCache {
+    unsigned long long generation = ~0ULL;
+    std::array<RefreshRateEntry, 8> entries{};
+    std::size_t count = 0;
+    std::size_t nextReplacement = 0;
+};
+thread_local RefreshRateCache g_refreshRates;
+
+int GetMonitorRefreshRate(HMONITOR monitor) {
+    const auto generation = fluid::displayGeneration.load(std::memory_order_relaxed);
+    if (g_refreshRates.generation != generation) {
+        g_refreshRates = {};
+        g_refreshRates.generation = generation;
+    }
+    for (std::size_t i = 0; i < g_refreshRates.count; ++i) {
+        if (g_refreshRates.entries[i].monitor == monitor)
+            return g_refreshRates.entries[i].fps;
+    }
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+    if (!GetMonitorInfoW(monitor, &info) ||
+        !EnumDisplaySettingsW(info.szDevice, ENUM_CURRENT_SETTINGS, &mode) ||
+        mode.dmDisplayFrequency <= 1) return 60;
+    const int fps = std::clamp(static_cast<int>(mode.dmDisplayFrequency), 30, 360);
+    const auto slot = g_refreshRates.count < g_refreshRates.entries.size() ?
+        g_refreshRates.count++ :
+        g_refreshRates.nextReplacement++ % g_refreshRates.entries.size();
+    g_refreshRates.entries[slot] = {monitor, fps};
+    return fps;
+}
+
 using TrayUI_SlideWindow_t = void(WINAPI*)(void* pThis,
                                            HWND hWnd,
                                            const RECT* rect,
@@ -297,16 +354,7 @@ void WINAPI TrayUI_SlideWindow_Hook(void* pThis,
         return;
     }
     int fps = g_settings.frameRate;
-    if (!fps) {
-        MONITORINFOEXW info{};
-        info.cbSize = sizeof(info);
-        DEVMODEW mode{};
-        mode.dmSize = sizeof(mode);
-        fps = 60;
-        if (GetMonitorInfoW(monitor, &info) &&
-            EnumDisplaySettingsW(info.szDevice, ENUM_CURRENT_SETTINGS, &mode) &&
-            mode.dmDisplayFrequency > 1) fps = mode.dmDisplayFrequency;
-    }
+    if (!fps) fps = GetMonitorRefreshRate(monitor);
     fps = std::clamp(fps, 30, 360);
     const double now = TimerGetSeconds();
     g_slide = {animate, show,
@@ -707,14 +755,7 @@ void Wh_ModUninit() {
     Wh_Log(L">");
 
     std::lock_guard<std::mutex> guard(g_animationMutex);
-    for (auto& record : g_animations) {
-        try {
-            record.animation.Duration(record.duration);
-            record.animation.DelayTime(record.delay);
-        } catch (...) {
-            Wh_Log(L"Animation object already released during unload");
-        }
-    }
+    for (const auto& record : g_animations) RestoreAnimation(record);
     g_animations.clear();
 }
 

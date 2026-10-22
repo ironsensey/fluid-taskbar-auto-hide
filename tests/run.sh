@@ -30,3 +30,5 @@ g++ -std=c++20 -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined test
 python3 tests/check_lifecycle.py
 
 python3 tests/check_power_paths.py
+
+python3 tests/check_animation_cache.py

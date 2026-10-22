@@ -50,7 +50,7 @@ header = '''// ==WindhawkMod==
 // @id              fluid-taskbar-auto-hide
 // @name            Fluid taskbar auto-hide
 // @description     Smooth taskbar animations with independent visibility controls for four displays
-// @version         2.1.0
+// @version         2.2.0
 // @author          m417z (original mods), Fluid taskbar contributors
 // @include         explorer.exe
 // @architecture    x86-64
@@ -151,7 +151,8 @@ BOOL Wh_ModSettingsChanged(BOOL* reload) {
 }
 '''
 output = (header + '\n'.join(settings) + '\n*/\n// ==/WindhawkModSettings==\n\n' +
-          '\n'.join(includes) + '\n\n' + '\n'.join(bodies) + footer)
+          '\n'.join(includes) + '\n\n' + (ROOT / 'src/runtime-state.inc').read_text() + '\n' +
+          '\n'.join(bodies) + footer)
 target = ROOT / 'fluid-taskbar-auto-hide.wh.cpp'
 if '--check' in sys.argv:
     assert target.read_text() == output, 'Regenerate fluid-taskbar-auto-hide.wh.cpp'

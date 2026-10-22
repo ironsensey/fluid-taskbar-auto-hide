@@ -23,6 +23,7 @@ def run(name, source):
 
 
 cache_stubs = r'''
+#include <atomic>
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
@@ -82,10 +83,12 @@ int main() {
     assert(enumerations == 6); // One rebuild even with concurrent readers.
 }
 '''
-run('monitor_cache', cache_stubs + section(visibility, 'struct MonitorSlot', 'bool AdaptivePinningEnabled') + cache_tests)
+run('monitor_cache', cache_stubs + (ROOT / 'src/runtime-state.inc').read_text() + section(visibility, 'struct MonitorSlot', 'bool AdaptivePinningEnabled') + cache_tests)
 print('Display cache: 400 lookups / 1 enumeration; hotplug, primary change, retry and concurrent access passed')
 
 animation_stubs = r'''
+#include <atomic>
+#include <array>
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -106,12 +109,13 @@ struct {
 } g_settings;
 double now = 0;
 int beginCalls = 0, endCalls = 0, refreshQueries = 0, clockQueries = 0;
-bool failTimer = false;
+bool failTimer = false, failDisplayInfo = false, failDisplayMode = false;
+int monitorFps = 144;
 std::vector<DWORD> sleeps;
 int timeBeginPeriod(int) { ++beginCalls; return failTimer ? 1 : 0; }
 void timeEndPeriod(int) { ++endCalls; }
-bool GetMonitorInfoW(HMONITOR, MONITORINFOEXW*) { ++refreshQueries; return true; }
-bool EnumDisplaySettingsW(const wchar_t*, int, DEVMODEW* mode) { mode->dmDisplayFrequency = 144; return true; }
+bool GetMonitorInfoW(HMONITOR, MONITORINFOEXW*) { ++refreshQueries; return !failDisplayInfo; }
+bool EnumDisplaySettingsW(const wchar_t*, int, DEVMODEW* mode) { mode->dmDisplayFrequency = monitorFps; return !failDisplayMode; }
 double TimerGetSeconds() { ++clockQueries; return now; }
 DWORD GetTickCount() { return 12345; }
 void Sleep(DWORD ms) { sleeps.push_back(ms); now += ms / 1000.0; }
@@ -144,6 +148,9 @@ void reset(Action next) {
     assert(!g_slide.active);
     now = 0; beginCalls = endCalls = refreshQueries = clockQueries = 0;
     failTimer = false; sleeps.clear(); action = next;
+    g_refreshRates = {};
+    failDisplayInfo = failDisplayMode = false;
+    monitorFps = 144;
 }
 void slide(bool animate = true) { TrayUI_SlideWindow_Hook(nullptr, 0, nullptr, 1, true, animate); }
 int main() {
@@ -170,9 +177,32 @@ int main() {
     assert(beginCalls == 1 && endCalls == 1 && !g_slide.active);
     reset(Action::Frames); g_settings.highPrecisionTimer = false; slide();
     assert(!beginCalls && !endCalls);
+    // Leaving the taskbar unused must not cause another synchronous mode query.
+    reset(Action::Frames); g_settings.highPrecisionTimer = true; slide();
+    assert(refreshQueries == 1);
+    now += 240; slide();
+    assert(refreshQueries == 1);
+    now += 3600; slide();
+    assert(refreshQueries == 1);
+    fluid::displayGeneration.fetch_add(1); slide();
+    assert(refreshQueries == 2);
+    assert(g_slide.active == false && beginCalls == endCalls);
+    reset(Action::NoSleep);
+    failDisplayMode = true;
+    assert(GetMonitorRefreshRate(1) == 60);
+    failDisplayMode = false;
+    assert(GetMonitorRefreshRate(1) == 144 && refreshQueries == 2);
+    // Fixed-size refresh cache stays bounded even with more than eight monitors.
+    for (int monitor = 2; monitor <= 20; ++monitor) GetMonitorRefreshRate(monitor);
+    assert(g_refreshRates.count == 8);
+    fluid::displayGeneration.fetch_add(1);
+    monitorFps = 60;
+    assert(GetMonitorRefreshRate(1) == 60);
+    reset(Action::NoSleep); g_settings.frameRate = 90; slide();
+    assert(refreshQueries == 0); // An explicit FPS bypasses mode detection.
 }
 '''
-run('lazy_timer', animation_stubs + slide_struct + (ROOT / 'animation-math.inc').read_text() + slide_hooks + animation_tests)
+run('lazy_timer', animation_stubs + (ROOT / 'src/runtime-state.inc').read_text() + slide_struct + (ROOT / 'animation-math.inc').read_text() + section(animation, 'struct RefreshRateEntry', 'using TrayUI_SlideWindow_t') + slide_hooks + animation_tests)
 print('Animation power paths: zero timer requests for instant/compositor-only/long-wait/late paths; scoped cleanup passed')
 
 predicate_stubs = r'''

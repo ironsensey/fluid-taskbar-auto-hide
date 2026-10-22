@@ -558,6 +558,7 @@ std::vector<MonitorSlot> g_monitorSlots;
 bool g_monitorSlotsValid = false;
 
 void InvalidateMonitorSlots() {
+    fluid::displayGeneration.fetch_add(1, std::memory_order_relaxed);
     std::lock_guard<std::mutex> guard(g_monitorSlotsMutex);
     g_monitorSlotsValid = false;
 }
