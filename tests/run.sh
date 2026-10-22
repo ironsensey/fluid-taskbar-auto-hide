@@ -19,6 +19,9 @@ keys = re.findall(r'^- (\w+):', settings, re.M)
 assert len(keys) == len(set(keys)) == 18
 assert keys.count('oldTaskbarOnWin11') == 1
 assert source.count('HMODULE WINAPI LoadLibraryExW_Hook(') == 1
+assert 'namespace click_lock {' in source
+assert source.count('if (Msg == click_lock::kToggleMessage)') == 2
+assert 'if (click_lock::IsPinned(hTaskbarWnd)) return true;' in source
 assert not re.search(r'^#include ["]', source, re.M), 'Local include in standalone file'
 print('Single-file lifecycle, settings, loader and embedded helpers checked')
 PY
@@ -32,3 +35,5 @@ python3 tests/check_lifecycle.py
 python3 tests/check_power_paths.py
 
 python3 tests/check_animation_cache.py
+
+python3 tests/check_click_lock.py

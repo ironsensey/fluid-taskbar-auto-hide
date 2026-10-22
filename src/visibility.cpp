@@ -603,6 +603,7 @@ bool NeedsWindowEvents() {
 }
 
 bool ShouldKeepTaskbarShown(HWND hTaskbarWnd, HMONITOR monitor) {
+    if (click_lock::IsPinned(hTaskbarWnd)) return true;
     if (!AdaptivePinningEnabled()) return false;
     if (!UseAdaptivePin(true, GetMonitorSlot(monitor), g_settings.pinDisplays))
         return false;
@@ -876,11 +877,18 @@ LRESULT WINAPI TrayUI_WndProc_Hook(void* pThis,
         InvalidateMonitorSlots();
         AdjustAllTaskbars();
     }
+    if (Msg == click_lock::kToggleMessage) {
+        click_lock::Toggle(hWnd);
+        AdjustTaskbar(hWnd);
+        return 0;
+    }
     if (Msg == WM_NCCREATE) {
+        click_lock::TrackTaskbar(hWnd);
         InvalidateMonitorSlots();
         Wh_Log(L"WM_NCCREATE: %08X", (DWORD)(ULONG_PTR)hWnd);
         AdjustTaskbar(hWnd);
     } else if (Msg == WM_NCDESTROY) {
+        click_lock::ForgetTaskbar(hWnd);
         InvalidateMonitorSlots();
         Wh_Log(L"WM_NCDESTROY: %08X", (DWORD)(ULONG_PTR)hWnd);
         g_taskbarsKeptShown.erase(
@@ -907,6 +915,7 @@ LRESULT WINAPI TrayUI_WndProc_Hook(void* pThis,
             SetRectEmpty(rect);
         }
     } else if (Msg == g_updateTaskbarStateRegisteredMsg) {
+        click_lock::TrackTaskbar(hWnd);
         if (!g_wasAutoHideProcessed) {
             g_wasAutoHideProcessed = true;
             g_wasAutoHideDisabled =
@@ -969,16 +978,24 @@ LRESULT WINAPI CSecondaryTray_v_WndProc_Hook(void* pThis,
         InvalidateMonitorSlots();
         AdjustTaskbar(hWnd);
     }
+    if (Msg == click_lock::kToggleMessage) {
+        click_lock::Toggle(hWnd);
+        AdjustTaskbar(hWnd);
+        return 0;
+    }
     if (Msg == WM_NCCREATE) {
+        click_lock::TrackTaskbar(hWnd);
         InvalidateMonitorSlots();
         Wh_Log(L"WM_NCCREATE: %08X", (DWORD)(ULONG_PTR)hWnd);
         AdjustTaskbar(hWnd);
     } else if (Msg == WM_NCDESTROY) {
+        click_lock::ForgetTaskbar(hWnd);
         InvalidateMonitorSlots();
         Wh_Log(L"WM_NCDESTROY: %08X", (DWORD)(ULONG_PTR)hWnd);
         g_taskbarsKeptShown.erase(pThis);
         g_taskbarToViewCoordinator.erase(hWnd);
     } else if (Msg == g_updateTaskbarStateRegisteredMsg) {
+        click_lock::TrackTaskbar(hWnd);
         void* pCSecondaryTray_ISecondaryTray =
             QueryViaVtable(pThis, CSecondaryTray_vftable_ISecondaryTray);
 

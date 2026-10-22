@@ -31,6 +31,11 @@ template<class T> bool Wh_SetFunctionHookT(T target, T, T* original) {
     return hookOk;
 }
 }
+namespace click_lock {
+bool startOk = true, started = false;
+bool Start() { calls.push_back("click.start"); started = startOk; return startOk; }
+void Stop() { if (started) calls.push_back("click.stop"); started = false; }
+}
 namespace visibility {
 BOOL Initialize() { calls.push_back("v.init"); return visibilityOk; }
 void AfterInitialize() { calls.push_back("v.after"); }
@@ -49,7 +54,7 @@ void HandleLoadedModuleIfTaskbarView(HMODULE, LPCWSTR) { calls.push_back("a.view
 tests = r'''
 int main() {
     assert(Wh_ModInit());
-    assert((calls == std::vector<std::string>{"hook", "v.init", "a.init"}));
+    assert((calls == std::vector<std::string>{"hook", "v.init", "a.init", "click.start"}));
     calls.clear();
     Wh_ModAfterInit();
     assert((calls == std::vector<std::string>{"v.after", "a.after"}));
@@ -61,7 +66,7 @@ int main() {
     assert(Wh_ModSettingsChanged(&reload) && reload);
     Wh_ModUninit();
     Wh_ModUninit();
-    assert((calls == std::vector<std::string>{"a.uninit", "v.uninit"}));
+    assert((calls == std::vector<std::string>{"click.stop", "a.uninit", "v.uninit"}));
     calls.clear();
     animationOk = false;
     assert(!Wh_ModInit());
@@ -75,6 +80,12 @@ int main() {
     hookOk = false;
     assert(!Wh_ModInit());
     assert((calls == std::vector<std::string>{"hook"}));
+    calls.clear();
+    hookOk = visibilityOk = animationOk = true;
+    click_lock::startOk = false;
+    assert(!Wh_ModInit());
+    Wh_ModUninit();
+    assert((calls == std::vector<std::string>{"hook", "v.init", "a.init", "click.start", "a.uninit", "v.uninit"}));
 }
 '''
 with tempfile.TemporaryDirectory(prefix='fluid-lifecycle-') as temp:

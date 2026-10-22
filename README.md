@@ -25,6 +25,31 @@ auto-hide while loaded, and restores the original state on unload. No registry e
 or restart loop are needed. When using ExplorerPatcher's old taskbar, enable
 `oldTaskbarOnWin11` in the combined mod.
 
+## Hidden double-click reveal lock (v2.3)
+
+Double-click **empty taskbar space** to hold that display's taskbar in the
+revealed position. Double-click empty space on the same taskbar again to release
+the manual lock and resume your existing visibility rules. Unlocking does not
+force a taskbar to hide while the pointer is over it or adaptive rules keep it up.
+
+This shortcut is always available, including when adaptive pinning is switched off.
+Each display has its own lock. It adds no setting, popup, message, sound, notification,
+tray icon, or lock indicator. Locks are session-only and reset on taskbar recreation,
+Explorer restart, mod reload/settings reload, or disable.
+
+App buttons, Start, search, tray/volume controls, and clock elements are not treated
+as empty space. Hit testing follows the empty accessibility peers used by Windhawk's
+`taskbar-empty-space-clicks` mod. Input observation is restricted to taskbar UI
+threads, and the original input messages are passed through. Only candidate left
+clicks wake a separate accessibility worker; there is no polling/keep-alive timer.
+The worker has a bounded queue, uses the Windows double-click time and distance,
+and keeps accessibility queries off Explorer's UI thread. Promoted mouse messages
+from the Windows 11 input site are ignored to avoid toggling twice for one click.
+
+The click recognition, routing, property toggles, queue limits, and lifecycle cleanup
+have been tested with Win32 stubs. Native accessibility/provider behavior and
+Windows compilation remain unverified in this Linux environment.
+
 ## Visibility settings
 
 By default the taskbar stays visible on the desktop and when using small windows.
@@ -168,6 +193,12 @@ These tests do **not** compile the Windows hooks or exercise Explorer.
 ### Required Windows validation — not executed in the Linux cloud environment
 
 - Compile the single `fluid-taskbar-auto-hide.wh.cpp` file in Windhawk; confirm successful initialization in logs.
+- Double-click empty space on the primary and secondary taskbars. Verify each locks
+  independently with no visible indicator; repeated window changes must not hide a
+  locked taskbar. Double-click again and move the pointer away to confirm normal
+  rules resume. Check app icons, Start, search, volume, clock, slow clicks, far-apart
+  clicks and triple-clicks do not cause unintended locks. Repeat with adaptive
+  pinning off. Verify reload/disable/recreated taskbars clear locks.
 - Desktop / one small window / several small windows: taskbar stays visible.
 - Maximize, restore, minimize, close, and fullscreen an app: correct visibility
   transitions, including maximized background apps and foreground-only mode.
@@ -197,12 +228,18 @@ Derived from m417z's GPL-3.0 Windhawk mods, downloaded from
 [ramensoftware/windhawk-mods](https://github.com/ramensoftware/windhawk-mods):
 `mods/taskbar-auto-hide-speed.wh.cpp` (1.1) and
 `mods/taskbar-auto-hide-when-maximized.wh.cpp` (1.2.6).
-Original attribution is retained in the source files. This repository contains local
+The empty-area accessibility peer allowlist follows
+`mods/taskbar-empty-space-clicks.wh.cpp` (upstream GPL-3.0); the input observation
+and reveal-lock implementation here are local. Original attribution is retained
+in the source files. This repository contains local
 modifications; it is not an upstream release. See `LICENSE` for GPL version 3.
 
 ## Source layout for development
 
 `src/animation.cpp` and `src/visibility.cpp` contain the component implementations.
+`src/click-lock.cpp` contains the hidden reveal lock, emitted inline in its own
+namespace before visibility hooks. Its worker starts with the mod and stops before
+animation/visibility cleanup.
 `python3 tools/build_single_file.py` regenerates the one installable `.wh.cpp` file.
 `src/runtime-state.inc` holds the shared display-change generation, emitted inline
 before both components. All includes are emitted outside the component namespaces. There is one shared

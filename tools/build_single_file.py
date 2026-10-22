@@ -46,15 +46,22 @@ for name, source in parts.items():
     assert count == 1
     bodies.append(f'namespace {name} {{\n{body.strip()}\n}} // namespace {name}\n')
 
+click_source = (ROOT / 'src/click-lock.cpp').read_text()
+for line in re.findall(r'^#include .+$', click_source, flags=re.M):
+    if line not in includes:
+        includes.append(line)
+click_body = re.sub(r'^#include .+\n', '', click_source, flags=re.M)
+click_body = 'namespace click_lock {\n' + click_body + '\n} // namespace click_lock\n'
+
 header = '''// ==WindhawkMod==
 // @id              fluid-taskbar-auto-hide
 // @name            Fluid taskbar auto-hide
 // @description     Smooth taskbar animations with independent visibility controls for four displays
-// @version         2.2.0
+// @version         2.3.0
 // @author          m417z (original mods), Fluid taskbar contributors
 // @include         explorer.exe
 // @architecture    x86-64
-// @compilerOptions -ldwmapi -lole32 -loleaut32 -lruntimeobject -lversion -lwinmm
+// @compilerOptions -DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 -ldwmapi -lole32 -loleaut32 -lruntimeobject -lversion -lwinmm
 // ==/WindhawkMod==
 
 // Original taskbar mods by m417z, licensed under GNU GPL v3.0.
@@ -77,6 +84,11 @@ Slot 1 is primary; others are ordered by device name. Slots can change after
 hotplugging. Native Windows 11 keeps its native animation curve; easing and FPS
 settings customize the classic taskbar. Enable the old-taskbar setting only
 when using ExplorerPatcher's classic taskbar.
+
+Hidden shortcut: double-click empty taskbar space to keep that display's taskbar
+revealed; repeat to release the lock and resume normal visibility rules.
+There is no popup, sound, notification, or visible lock indicator. Locks reset
+when the taskbar is recreated or the mod is reloaded/disabled.
 
 Disable the previous Fluid animation/visibility companion mods and other
 mods controlling the same behavior before enabling this combined mod.
@@ -125,6 +137,13 @@ BOOL Wh_ModInit() {
         return FALSE;
     }
     fluid::animationInitialized = true;
+    if (!click_lock::Start()) {
+        animation::Uninitialize();
+        fluid::animationInitialized = false;
+        visibility::Uninitialize();
+        fluid::visibilityInitialized = false;
+        return FALSE;
+    }
     return TRUE;
 }
 
@@ -134,6 +153,7 @@ void Wh_ModAfterInit() {
 }
 
 void Wh_ModUninit() {
+    click_lock::Stop();
     if (fluid::animationInitialized) {
         animation::Uninitialize();
         fluid::animationInitialized = false;
@@ -152,7 +172,7 @@ BOOL Wh_ModSettingsChanged(BOOL* reload) {
 '''
 output = (header + '\n'.join(settings) + '\n*/\n// ==/WindhawkModSettings==\n\n' +
           '\n'.join(includes) + '\n\n' + (ROOT / 'src/runtime-state.inc').read_text() + '\n' +
-          '\n'.join(bodies) + footer)
+          click_body + '\n' + '\n'.join(bodies) + footer)
 target = ROOT / 'fluid-taskbar-auto-hide.wh.cpp'
 if '--check' in sys.argv:
     assert target.read_text() == output, 'Regenerate fluid-taskbar-auto-hide.wh.cpp'
